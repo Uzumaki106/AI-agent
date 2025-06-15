@@ -1,0 +1,135 @@
+import pandas as pd
+from together import Together
+import time
+import re
+
+# List of API keys
+api_keys = ["4b5ae4d749f440c5e2798be576de2f8eaee400dc813a1dae8e7dc1fafc038f8c", "213699d5ded8881f37c50a5b3d9c42f0221351fd8eb2b64ee524aa91a73e0eb0", "05e322fa5bf5455ed7473cd3d9a2973e3b25cc58beb43805643f5ce27b17b89e"]
+
+# Initialize current API key index
+current_api_key_index = 0
+
+def get_api_key():
+    global current_api_key_index
+    api_key = api_keys[current_api_key_index]
+    current_api_key_index = (current_api_key_index + 1) % len(api_keys)
+    return api_key
+
+# Get the first API key
+api_key = get_api_key()
+client = Together(api_key=api_key)
+
+dataset_path = "path to dataset  # Replace with your actual CSV file path
+df = pd.read_csv(dataset_path)
+
+# Take a Sample (first 50 rows) and Convert to CSV Text
+MAX_ROWS = 50
+sample_df = df.sample(n=MAX_ROWS, random_state=42) 
+csv_text = sample_df.to_csv(index=False)
+
+
+# Create initial LLM prompt
+initial_prompt = "You are a data analyst assistant.\n\n"
+initial_prompt += "Here the dataset sample\n"
+initial_prompt += csv_text
+initial_prompt += "\n\n"
+
+
+task_prompts = {
+    "eda": "give code for Performing exploratory data analysis on the provided dataset.Create basic visualizations to explore the data Generate: Histograms for each numerical column, Bar plots for categorical columns (top 10 categories if too many)., Correlation heatmap for numerical columns, Box plots to detect outliers and other if you think ints necessary accrding to dataset. Use matplotlib or seaborn. Show each plot with a title.",
+    "clean data": " give code for Preprocess the dataset by dropping columns with over 40% missing values, filling missing numeric values with the column mean, categorical values with the mode, converting columns to appropriate data types (float, int, string, category), and dropping duplicate rows.",
+    "heatmap" : "Make a heatmap using using predefined libraries",
+    "conversation asking about dataset" : "Reply Normaly like talking with a person, like a chatbot, you can ask things like hi what help do you need or do you need help with this dataset",
+    "Feature engineering" : "Create new features from the existing dataset, such as extracting relevant information from text columns or creating new columns based on existing ones.",
+    "Financial analysis" : "Perform financial analysis on the dataset, including calculating returns, volatility, and other relevant metrics.",
+    "Conversational analysis" : "Analyze the conversation history and provide insights or recommendations.",
+    # Add more task prompts as needed
+    "unknown": "Perform what you think is best"
+}
+
+default_structure = "Please provide a concise and relevant response. If the task is 'conversation', respond as you would in a normal conversation. If the task requires code, provide a code snippet in python and keep it basic. Use a standard formatting style and avoid explanations or comments. Load dataset as this df=pd.read_csv('/content/sample_data/california_housing_train.csv'), ignore this prompt if the task is 'conversation'."
+
+conversation_history = []
+
+turns_to_summarize = 3
+summary_threshold = turns_to_summarize * 2
+
+while True:
+    # Get user input
+    user_input = input("User: ")
+
+    # Identify task based on user input
+    task_identification_prompt = "Identify the task based on the following user query: " + user_input + "\n\nAvailable tasks: " + str(list(task_prompts.keys()))
+    api_key = get_api_key()
+    client = Together(api_key=api_key)
+    task_identification_response = client.chat.completions.create(
+        model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        messages=[
+            {"role": "system", "content": "You are a helpful task identification assistant."},
+            {"role": "user", "content": task_identification_prompt}
+        ]
+    )
+    task = task_identification_response.choices[0].message.content.strip().lower()
+    if task not in task_prompts:
+        task = "unknown"
+
+    # Create LLM prompt with conversation history and task prompt
+    llm_prompt = initial_prompt
+    if len(conversation_history) > summary_threshold:
+        # summarize conversation history
+        summary_prompt = "Summarize the following conversation:\n\n"
+        for message in conversation_history:
+            summary_prompt += f"{message['role']}: {message['content']}\n"
+        api_key = get_api_key()
+        client = Together(api_key=api_key)
+        summary_response = client.chat.completions.create(
+            model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            messages=[
+                {"role": "system", "content": "You are a helpful summarization assistant."},
+                {"role": "user", "content": summary_prompt}
+            ]
+        )
+        summary = summary_response.choices[0].message.content
+        llm_prompt += "Previous conversation summary:\n" + summary + "\n\n"
+        conversation_history = [{"role": "assistant", "content": summary}]
+    else:
+        for message in conversation_history:
+            llm_prompt += f"{message['role']}: {message['content']}\n"
+    llm_prompt += default_structure + "\n\n" + task_prompts[task] + "\n\n" + user_input
+
+    # Send prompt to LLaMA-4 via Together API
+    messages = [
+        {"role": "system", "content": "You are a helpful data analysis assistant."},
+        {"role": "user", "content": llm_prompt}
+    ]
+    api_key = get_api_key()
+    client = Together(api_key=api_key)
+    response = client.chat.completions.create(
+        model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        messages=messages
+    )
+
+    # Print LLM response
+    print("🧠 AI Agent Response:\n")
+    llm_response = response.choices[0].message.content
+
+    # Update conversation history
+    conversation_history.append({"role": "user", "content": user_input})
+    conversation_history.append({"role": "assistant", "content": llm_response})
+
+    code_blocks = re.findall(r'```(?:python)?\s*(.*?)\s*```', llm_response, re.DOTALL | re.IGNORECASE)
+
+    if code_blocks:
+        # Run the extracted code in a Colab cell
+        for code_block in code_blocks:
+            try:
+                exec(code_block.strip())
+            except Exception as e:
+                print(f"Error running code: {e}")
+    else:
+        print(llm_response)
+
+
+    # Add a delay to avoid exceeding the rate limit
+    print("Waiting for 100 seconds...")
+    time.sleep(100)
